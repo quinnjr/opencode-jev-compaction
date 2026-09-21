@@ -161,6 +161,36 @@ describe("estimate / build / collect", () => {
     expect(buildState([part], 6)).toContain("error 1000 chars")
   })
 
+  test("falls back to state.error when metadata.output is not an interrupted string", () => {
+    const noFlag = {
+      info: { role: "assistant", id: "m1" } as any,
+      parts: [
+        {
+          type: "tool",
+          id: "c1",
+          callID: "c1",
+          tool: "Bash",
+          state: { status: "error", input: {}, error: big(500), metadata: { output: big(1000) }, time: { start: 0, end: 1 } },
+        } as any,
+      ],
+    }
+    expect(buildState([noFlag], 6)).toContain("error 500 chars")
+
+    const nonString = {
+      info: { role: "assistant", id: "m2" } as any,
+      parts: [
+        {
+          type: "tool",
+          id: "c2",
+          callID: "c2",
+          tool: "Bash",
+          state: { status: "error", input: {}, error: big(500), metadata: { interrupted: true, output: 123 }, time: { start: 0, end: 1 } },
+        } as any,
+      ],
+    }
+    expect(buildState([nonString], 6)).toContain("error 500 chars")
+  })
+
   test("includes file names and abridged reasoning in the state", () => {
     const messages = [
       { info: { role: "assistant", id: "a1" } as any, parts: [{ type: "file", id: "f1", filename: "src/a.ts", url: "x" } as any] },
@@ -196,6 +226,14 @@ describe("fitState", () => {
   test("returns null when it cannot fit", () => {
     const state = Array.from({ length: 50 }, () => "b".repeat(2000)).join("\n")
     expect(fitState(state, 1)).toBeNull()
+  })
+
+  test("preserves short lines while abridging long ones", () => {
+    const short = "x".repeat(250)
+    const fitted = fitState([short, "y".repeat(5000)].join("\n"), 200)
+    expect(fitted).not.toBeNull()
+    expect(fitted!).toContain(short)
+    expect(fitted!).toContain("chars omitted")
   })
 
   test("does not reintroduce newlines that could forge state lines", () => {
