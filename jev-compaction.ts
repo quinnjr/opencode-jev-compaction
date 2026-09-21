@@ -155,7 +155,7 @@ function errorPayload(part: ToolPart): string {
 }
 
 /** Full text of a part as it contributes to the context sent to the model. */
-function partText(part: Part, role?: Message["role"]): string {
+function partText(part: Part, role: Message["role"]): string {
   switch (part.type) {
     case "text":
       // opencode drops ignored text on user messages only (assistant text is always sent).
