@@ -126,6 +126,13 @@ describe("estimate / build / collect", () => {
     expect(buildState(messages, 6)).not.toContain("SECRET-IGNORED")
   })
 
+  test("keeps ignored assistant text (opencode only drops ignored user text)", () => {
+    const messages = [
+      { info: { role: "assistant", id: "a1" } as any, parts: [{ type: "text", id: "t1", ignored: true, text: "ASSISTANT-IGNORED" } as any] },
+    ]
+    expect(buildState(messages, 6)).toContain("ASSISTANT-IGNORED")
+  })
+
   test("neutralizes newlines in conversation text in the state", () => {
     const messages = [
       {
@@ -786,6 +793,14 @@ describe("compact", () => {
     ]
     const result = await compact(messages, opts({ ask: async () => ({ answers: {} }), preserveRecent: 0, threshold: 5000 }))
     expect(result.skipped).toBe("under threshold")
+  })
+
+  test("still counts ignored assistant text in the threshold gate", async () => {
+    const messages = [
+      { info: { role: "assistant", id: "a0" } as any, parts: [{ type: "text", id: "t0", ignored: true, text: "z".repeat(40000) } as any] },
+    ]
+    const result = await compact(messages, opts({ ask: async () => ({ answers: {} }), preserveRecent: 0, threshold: 5000 }))
+    expect(result.skipped).not.toBe("under threshold")
   })
 
   test("keeps calls when the asker throws", async () => {

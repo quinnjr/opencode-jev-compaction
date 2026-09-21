@@ -155,11 +155,11 @@ function errorPayload(part: ToolPart): string {
 }
 
 /** Full text of a part as it contributes to the context sent to the model. */
-function partText(part: Part): string {
+function partText(part: Part, role?: Message["role"]): string {
   switch (part.type) {
     case "text":
-      // opencode drops text parts marked ignored before sending them to the model.
-      return part.ignored ? "" : part.text
+      // opencode drops ignored text on user messages only (assistant text is always sent).
+      return role === "user" && part.ignored ? "" : part.text
     case "reasoning":
       return part.text
     case "file":
@@ -177,13 +177,13 @@ export function estimateTokens(text: string): number {
 }
 
 /** Estimated context tokens for one part, including any tool attachments. */
-function estimatePartTokens(part: Part): number {
+function estimatePartTokens(part: Part, role: Message["role"]): number {
   if (isToolPart(part) && part.state.status === "completed") {
     const attachmentChars = (part.state.attachments ?? []).reduce((sum, file) => sum + (file.url?.length ?? 0), 0)
-    return estimateTokens(partText(part)) + Math.ceil(attachmentChars / 4)
+    return estimateTokens(partText(part, role)) + Math.ceil(attachmentChars / 4)
   }
-  if (part.type === "file") return estimateTokens(partText(part)) + Math.ceil((part.url?.length ?? 0) / 4)
-  return estimateTokens(partText(part))
+  if (part.type === "file") return estimateTokens(partText(part, role)) + Math.ceil((part.url?.length ?? 0) / 4)
+  return estimateTokens(partText(part, role))
 }
 
 function toolStatus(part: ToolPart): string {
@@ -226,7 +226,7 @@ export function buildState(messages: Msg[], preserveRecent: number, sendText = t
         const input = summarize(JSON.stringify(part.state.input ?? {}), TOOL_INPUT_STATE_CHARS)
         lines.push(`  call ${oneLine(part.tool)} input=${input} -> ${toolStatus(part)}`)
       } else if (sendText) {
-        const text = stateLine(partText(part).trim())
+        const text = stateLine(partText(part, message.info.role).trim())
         if (text) lines.push(`  ${stateLine(abridge(text, STATE_TEXT_HEAD, STATE_TEXT_TAIL))}`)
       }
     }
@@ -460,7 +460,7 @@ export async function compact(messages: Msg[], options: CompactionOptions): Prom
   if (!options.enabled) return { ...empty, skipped: "disabled" }
   if (messages.length === 0) return { ...empty, skipped: "empty" }
 
-  const totalTokens = messages.reduce((sum, m) => sum + m.parts.reduce((s, p) => s + estimatePartTokens(p), 0), 0)
+  const totalTokens = messages.reduce((sum, m) => sum + m.parts.reduce((s, p) => s + estimatePartTokens(p, m.info.role), 0), 0)
   if (totalTokens < options.threshold) return { ...empty, skipped: "under threshold" }
 
   const fitted = fitState(buildState(messages, options.preserveRecent, options.sendText ?? DEFAULT_OPTIONS.sendText), options.maxStateTokens)
