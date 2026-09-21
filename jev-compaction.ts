@@ -43,6 +43,8 @@ export type CompactionOptions = {
   timeoutMs?: number
   /** Send abridged conversation text (not just tool metadata) as part of the state. Defaults to true. */
   sendText?: boolean
+  /** Maximum Jev requests in flight at once. Defaults to 4. */
+  maxConcurrentRequests?: number
   apiKey?: string
   model: string
   baseUrl: string
@@ -61,6 +63,7 @@ export const DEFAULT_OPTIONS: Omit<Required<CompactionOptions>, "ask" | "log" | 
   maxRequestTokens: 30_000,
   timeoutMs: 10_000,
   sendText: true,
+  maxConcurrentRequests: 4,
   model: "jev-latest",
   baseUrl: "https://api.typesafe.ai/v1/systemone",
   debug: false,
@@ -98,6 +101,7 @@ export function optionsFromEnv(
     truncateHeadChars: atLeast(env.JEV_TRUNCATE_HEAD_CHARS, DEFAULT_OPTIONS.truncateHeadChars, 0),
     timeoutMs: atLeast(env.JEV_TIMEOUT_MS, DEFAULT_OPTIONS.timeoutMs, 1),
     sendText: env.JEV_STATE_INCLUDE_TEXT !== "0",
+    maxConcurrentRequests: atLeast(env.JEV_MAX_CONCURRENT, DEFAULT_OPTIONS.maxConcurrentRequests, 1),
     model: env.JEV_MODEL || DEFAULT_OPTIONS.model,
     baseUrl: env.JEV_BASE_URL || DEFAULT_OPTIONS.baseUrl,
     debug: env.JEV_COMPACTION_DEBUG === "1",
@@ -149,7 +153,7 @@ function partText(part: Part): string {
     case "reasoning":
       return part.text
     case "file":
-      return `[file ${part.filename ?? part.url}]`
+      return `[file ${oneLine(part.filename ?? part.url)}]`
     case "tool":
       return `[tool ${part.tool} ${JSON.stringify(part.state.input ?? {})} ${toolPayload(part)}]`
     default:
@@ -160,6 +164,15 @@ function partText(part: Part): string {
 /** Character-based estimate; deliberately not a tokenizer (see README caveats). */
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4)
+}
+
+/** Estimated context tokens for one part, including any tool attachments. */
+function estimatePartTokens(part: Part): number {
+  if (isToolPart(part) && part.state.status === "completed") {
+    const attachmentChars = (part.state.attachments ?? []).reduce((sum, file) => sum + (file.url?.length ?? 0), 0)
+    return estimateTokens(partText(part)) + Math.ceil(attachmentChars / 4)
+  }
+  return estimateTokens(partText(part))
 }
 
 function toolStatus(part: ToolPart): string {
@@ -362,12 +375,17 @@ export function applyDecisions(messages: Msg[], decisions: Map<string, Decision>
 function truncateToolResult(part: ToolPart, headChars: number): ToolPart | null {
   const state = part.state
   if (state.status === "completed") {
-    if (state.output.length <= headChars) return null
-    const note = `\n\n[jev-compaction: ${state.output.length - headChars} chars omitted; re-run ${oneLine(part.tool)} if needed]`
+    const over = state.output.length > headChars
+    const hasAttachments = (state.attachments?.length ?? 0) > 0
+    if (!over && !hasAttachments) return null
+    const note = over ? `\n\n[jev-compaction: ${state.output.length - headChars} chars omitted; re-run ${oneLine(part.tool)} if needed]` : ""
     // Do not set time.compacted: opencode reads that as "content cleared" and
     // replaces the output with a generic marker, discarding this preview. Drop
     // attachments too, since the result was judged not needed verbatim.
-    return { ...part, state: { ...state, output: state.output.slice(0, headChars) + note, attachments: undefined } }
+    return {
+      ...part,
+      state: { ...state, output: (over ? state.output.slice(0, headChars) : state.output) + note, attachments: undefined },
+    }
   }
   if (state.status === "error") {
     const payload = errorPayload(part)
@@ -385,13 +403,32 @@ function truncateToolResult(part: ToolPart, headChars: number): ToolPart | null 
 export type SkipReason = "disabled" | "empty" | "under threshold" | "state too large" | "no candidates" | "no request budget"
 export type CompactResult = ApplyResult & { skipped?: SkipReason }
 
+/** Run tasks with bounded concurrency, settling each so one failure cannot orphan the rest. */
+async function mapLimit<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length)
+  let next = 0
+  const worker = async () => {
+    for (;;) {
+      const index = next++
+      if (index >= items.length) return
+      try {
+        results[index] = { status: "fulfilled", value: await run(items[index]) }
+      } catch (reason) {
+        results[index] = { status: "rejected", reason }
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker))
+  return results
+}
+
 export async function compact(messages: Msg[], options: CompactionOptions): Promise<CompactResult> {
   const log = options.log ?? (() => {})
   const empty: CompactResult = { messages, changed: false, kept: 0, truncated: 0, removed: 0 }
   if (!options.enabled) return { ...empty, skipped: "disabled" }
   if (messages.length === 0) return { ...empty, skipped: "empty" }
 
-  const totalTokens = messages.reduce((sum, m) => sum + estimateTokens(m.parts.map(partText).join("\n")), 0)
+  const totalTokens = messages.reduce((sum, m) => sum + m.parts.reduce((s, p) => s + estimatePartTokens(p), 0), 0)
   if (totalTokens < options.threshold) return { ...empty, skipped: "under threshold" }
 
   const fitted = fitState(buildState(messages, options.preserveRecent, options.sendText ?? DEFAULT_OPTIONS.sendText), options.maxStateTokens)
@@ -413,11 +450,12 @@ export async function compact(messages: Msg[], options: CompactionOptions): Prom
     return { batch, start }
   })
 
-  // allSettled so one failed batch cannot discard the other batches' decisions.
-  // Each job is wrapped in async so a synchronous throw becomes a handled
-  // rejection instead of orphaning earlier in-flight promises.
-  const settled = await Promise.allSettled(
-    jobs.map(async ({ batch, start }) => ask(fitted, questionsFor(batch, start).questions)),
+  // Bounded concurrency with per-task settling: one failed batch cannot discard
+  // the others' decisions, and a large candidate set cannot burst all requests
+  // at once. Each task is awaited inside mapLimit's try/catch, so a synchronous
+  // throw becomes a handled rejection.
+  const settled = await mapLimit(jobs, options.maxConcurrentRequests ?? DEFAULT_OPTIONS.maxConcurrentRequests, ({ batch, start }) =>
+    ask(fitted, questionsFor(batch, start).questions),
   )
 
   const decisions = new Map<string, Decision>()

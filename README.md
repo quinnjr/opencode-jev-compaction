@@ -35,8 +35,11 @@ before each request to the model.
 5. Decide against `JEV_KEEP_THRESHOLD` (default 0.5):
    - `keep_result ≥ threshold` → keep the call and result untouched;
    - else `keep_call ≥ threshold` → keep the call, truncate the result to its
-     first `JEV_TRUNCATE_HEAD_CHARS` characters plus a one-line note;
+     first `JEV_TRUNCATE_HEAD_CHARS` characters plus a one-line note (any
+     attachments are dropped);
    - else → remove the call together with its result.
+   An in-flight (`pending`/`running`) call is never removed — only completed or
+   errored calls are candidates for truncation or removal.
 6. A message left with no parts is dropped.
 
 Failures never break a session. A missing key, an unfittable history, or an
@@ -88,6 +91,7 @@ All configuration is environment-based.
 | `JEV_BASE_URL` | `https://api.typesafe.ai/v1/systemone` | System One endpoint. Must be `https://` (or `http://` on loopback); anything else is refused so the bearer token cannot be redirected. |
 | `JEV_TIMEOUT_MS` | `10000` | Abort a Jev request after this many milliseconds so a stalled call cannot block generation. |
 | `JEV_STATE_INCLUDE_TEXT` | `1` | Set to `0` to send only tool metadata as the state, omitting abridged conversation text. |
+| `JEV_MAX_CONCURRENT` | `4` | Maximum Jev requests in flight at once. |
 | `JEV_COMPACTION_DEBUG` | `0` | Set to `1` for debug logging. |
 
 ## Data sent to Jev
