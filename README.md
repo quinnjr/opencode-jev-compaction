@@ -89,7 +89,8 @@ All configuration is environment-based.
 | `JEV_TRUNCATE_HEAD_CHARS` | `300` | Characters of a dropped tool result kept as a preview. |
 | `JEV_MODEL` | `jev-latest` | Jev model name. |
 | `JEV_BASE_URL` | `https://api.typesafe.ai/v1/systemone` | System One endpoint. Must be `https://` (or `http://` on loopback); anything else is refused so the bearer token cannot be redirected. |
-| `JEV_TIMEOUT_MS` | `10000` | Abort a Jev request after this many milliseconds so a stalled call cannot block generation. |
+| `JEV_TIMEOUT_MS` | `10000` | Abort a single Jev request after this many milliseconds. |
+| `JEV_TOTAL_TIMEOUT_MS` | `30000` | Overall deadline for all Jev requests in one turn; remaining batches are kept once it passes, so a stalled Jev cannot block generation. |
 | `JEV_STATE_INCLUDE_TEXT` | `1` | Set to `0` to send only tool metadata as the state, omitting abridged conversation text. |
 | `JEV_MAX_CONCURRENT` | `4` | Maximum Jev requests in flight at once. |
 | `JEV_COMPACTION_DEBUG` | `0` | Set to `1` for debug logging. |

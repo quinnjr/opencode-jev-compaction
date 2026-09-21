@@ -45,6 +45,8 @@ export type CompactionOptions = {
   sendText?: boolean
   /** Maximum Jev requests in flight at once. Defaults to 4. */
   maxConcurrentRequests?: number
+  /** Overall deadline for all Jev requests in one turn, in milliseconds. Defaults to 30000. */
+  totalTimeoutMs?: number
   apiKey?: string
   model: string
   baseUrl: string
@@ -64,6 +66,7 @@ export const DEFAULT_OPTIONS: Omit<Required<CompactionOptions>, "ask" | "log" | 
   timeoutMs: 10_000,
   sendText: true,
   maxConcurrentRequests: 4,
+  totalTimeoutMs: 30_000,
   model: "jev-latest",
   baseUrl: "https://api.typesafe.ai/v1/systemone",
   debug: false,
@@ -102,6 +105,7 @@ export function optionsFromEnv(
     timeoutMs: atLeast(env.JEV_TIMEOUT_MS, DEFAULT_OPTIONS.timeoutMs, 1),
     sendText: env.JEV_STATE_INCLUDE_TEXT !== "0",
     maxConcurrentRequests: atLeast(env.JEV_MAX_CONCURRENT, DEFAULT_OPTIONS.maxConcurrentRequests, 1),
+    totalTimeoutMs: atLeast(env.JEV_TOTAL_TIMEOUT_MS, DEFAULT_OPTIONS.totalTimeoutMs, 1),
     model: env.JEV_MODEL || DEFAULT_OPTIONS.model,
     baseUrl: env.JEV_BASE_URL || DEFAULT_OPTIONS.baseUrl,
     debug: env.JEV_COMPACTION_DEBUG === "1",
@@ -118,6 +122,11 @@ function summarize(text: string, max: number): string {
 /** Collapse whitespace and clamp, so a hostile tool name cannot forge state lines. */
 function oneLine(text: string, max = TOOL_NAME_MAX_CHARS): string {
   return text.replace(/\s+/g, " ").slice(0, max)
+}
+
+/** Neutralize newlines in text pushed into the line-oriented state, without clamping. */
+function stateLine(text: string): string {
+  return text.replace(/[\r\n]+/g, " ")
 }
 
 function abridge(text: string, head: number, tail: number): string {
@@ -172,6 +181,7 @@ function estimatePartTokens(part: Part): number {
     const attachmentChars = (part.state.attachments ?? []).reduce((sum, file) => sum + (file.url?.length ?? 0), 0)
     return estimateTokens(partText(part)) + Math.ceil(attachmentChars / 4)
   }
+  if (part.type === "file") return estimateTokens(partText(part)) + Math.ceil((part.url?.length ?? 0) / 4)
   return estimateTokens(partText(part))
 }
 
@@ -215,8 +225,8 @@ export function buildState(messages: Msg[], preserveRecent: number, sendText = t
         const input = summarize(JSON.stringify(part.state.input ?? {}), TOOL_INPUT_STATE_CHARS)
         lines.push(`  call ${oneLine(part.tool)} input=${input} -> ${toolStatus(part)}`)
       } else if (sendText) {
-        const text = partText(part).trim()
-        if (text) lines.push(`  ${abridge(text, STATE_TEXT_HEAD, STATE_TEXT_TAIL)}`)
+        const text = stateLine(partText(part).trim())
+        if (text) lines.push(`  ${stateLine(abridge(text, STATE_TEXT_HEAD, STATE_TEXT_TAIL))}`)
       }
     }
   })
@@ -403,14 +413,23 @@ function truncateToolResult(part: ToolPart, headChars: number): ToolPart | null 
 export type SkipReason = "disabled" | "empty" | "under threshold" | "state too large" | "no candidates" | "no request budget"
 export type CompactResult = ApplyResult & { skipped?: SkipReason }
 
-/** Run tasks with bounded concurrency, settling each so one failure cannot orphan the rest. */
-async function mapLimit<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<PromiseSettledResult<R>[]> {
+/** Run tasks with bounded concurrency and an overall deadline, settling each so one failure cannot orphan the rest. */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  deadline: number,
+  run: (item: T) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
   const results: PromiseSettledResult<R>[] = new Array(items.length)
   let next = 0
   const worker = async () => {
     for (;;) {
       const index = next++
       if (index >= items.length) return
+      if (Date.now() >= deadline) {
+        results[index] = { status: "rejected", reason: new Error("jev-compaction total deadline exceeded") }
+        continue
+      }
       try {
         results[index] = { status: "fulfilled", value: await run(items[index]) }
       } catch (reason) {
@@ -451,11 +470,16 @@ export async function compact(messages: Msg[], options: CompactionOptions): Prom
   })
 
   // Bounded concurrency with per-task settling: one failed batch cannot discard
-  // the others' decisions, and a large candidate set cannot burst all requests
-  // at once. Each task is awaited inside mapLimit's try/catch, so a synchronous
-  // throw becomes a handled rejection.
-  const settled = await mapLimit(jobs, options.maxConcurrentRequests ?? DEFAULT_OPTIONS.maxConcurrentRequests, ({ batch, start }) =>
-    ask(fitted, questionsFor(batch, start).questions),
+  // the others' decisions, a large candidate set cannot burst all requests at
+  // once, and the overall deadline keeps the hook from blocking generation for
+  // waves x timeoutMs. Each task is awaited inside mapLimit's try/catch, so a
+  // synchronous throw becomes a handled rejection.
+  const deadline = Date.now() + (options.totalTimeoutMs ?? DEFAULT_OPTIONS.totalTimeoutMs)
+  const settled = await mapLimit(
+    jobs,
+    options.maxConcurrentRequests ?? DEFAULT_OPTIONS.maxConcurrentRequests,
+    deadline,
+    ({ batch, start }) => ask(fitted, questionsFor(batch, start).questions),
   )
 
   const decisions = new Map<string, Decision>()
