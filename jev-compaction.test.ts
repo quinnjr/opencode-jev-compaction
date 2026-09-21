@@ -429,6 +429,49 @@ describe("compact", () => {
     expect(result.changed).toBe(false)
   })
 
+  test("keeps everything when answers are non-finite", async () => {
+    const nan: JevAsker = async (_state, questions) => {
+      const answers: Record<string, { noul: number }> = {}
+      for (const key of Object.keys(questions)) answers[key] = { noul: NaN }
+      return { answers }
+    }
+    const nanResult = await compact(history(), opts({ ask: nan, preserveRecent: 1 }))
+    expect(nanResult.changed).toBe(false)
+    expect(nanResult.removed).toBe(0)
+
+    const inf: JevAsker = async (_state, questions) => {
+      const answers: Record<string, { noul: number }> = {}
+      for (const key of Object.keys(questions)) answers[key] = { noul: -Infinity }
+      return { answers }
+    }
+    const infResult = await compact(history(), opts({ ask: inf, preserveRecent: 1 }))
+    expect(infResult.changed).toBe(false)
+    expect(infResult.removed).toBe(0)
+  })
+
+  test("omits conversation text from the state when sendText is off", async () => {
+    const states: string[] = []
+    const ask: JevAsker = async (state) => {
+      states.push(state)
+      return { answers: {} }
+    }
+    const messages = [
+      userText("u0", "TOPSECRET-PROMPT"),
+      tool("m1", "c1", "Read", { file: "a.ts" }, big(200)),
+      assistantText("a2", "TOPSECRET-REPLY"),
+    ]
+    await compact(messages, opts({ ask, preserveRecent: 0, threshold: 0, sendText: false }))
+    const state = states.join("\n")
+    expect(state).not.toContain("TOPSECRET")
+    expect(state).toContain("call Read")
+  })
+
+  test("logs a summary when debug is on", async () => {
+    const logs: string[] = []
+    await compact(history(), opts({ ask: policyAsk, preserveRecent: 1, debug: true, log: (_l, m) => void logs.push(m) }))
+    expect(logs).toContain("jev-compaction applied")
+  })
+
   test("honours keepThreshold", async () => {
     const ask: JevAsker = async (_state, questions) => {
       const answers: Record<string, { noul: number }> = {}
@@ -722,6 +765,20 @@ describe("plugin wrapper", () => {
     await expect(hooks["experimental.chat.messages.transform"]!({}, output)).resolves.toBeUndefined()
   })
 
+  test("logs load and skip messages when debug is on", async () => {
+    process.env.JEV_COMPACTION_DEBUG = "1"
+    process.env.TYPESAFE_API_KEY = "test-key"
+    process.env.JEV_COMPACTION_THRESHOLD = "1000000"
+    const logs: string[] = []
+    const hooks = await JevCompactionPlugin({
+      client: { app: { log: async ({ body }: any) => void logs.push(body.message) } },
+    } as any)
+    expect(logs).toContain("jev-compaction loaded")
+    const output = { messages: history() } as any
+    await hooks["experimental.chat.messages.transform"]!({}, output)
+    expect(logs).toContain("skipped: under threshold")
+  })
+
   test("swallows an unexpected compaction error", async () => {
     process.env.TYPESAFE_API_KEY = "test-key"
     process.env.JEV_COMPACTION_THRESHOLD = "0"
@@ -750,9 +807,13 @@ describe("plugin wrapper", () => {
       return { ok: true, status: 200, json: async () => ({ answers }) } as any
     }) as any
     const hooks = await JevCompactionPlugin({ client: { app: { log: async () => {} } } } as any)
-    const output = { messages: history() } as any
+    const messages = history()
+    const output = { messages } as any
     await hooks["experimental.chat.messages.transform"]!({}, output)
-    const ids = output.messages.flatMap((m: any) => m.parts.map((p: any) => p.id))
+    // opencode keeps its own array reference and discards the hook's return,
+    // so the original array must be mutated in place.
+    expect(output.messages).toBe(messages)
+    const ids = messages.flatMap((m: any) => m.parts.map((p: any) => p.id))
     expect(ids).not.toContain("c1")
     expect(ids).not.toContain("c2")
   })

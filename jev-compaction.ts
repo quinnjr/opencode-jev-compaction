@@ -292,7 +292,8 @@ export async function defaultAsk(options: CompactionOptions): Promise<JevAsker> 
 
 function answerNoul(response: JevResponse | null | undefined, key: string): number | undefined {
   const value = response?.answers?.[key]?.noul
-  return typeof value === "number" ? value : undefined
+  // Non-finite (NaN, ±Infinity) is not a usable probability; treat it as unanswered.
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }
 
 export type ApplyResult = { messages: Msg[]; changed: boolean; kept: number; truncated: number; removed: number }
@@ -464,7 +465,9 @@ export const JevCompactionPlugin: Plugin = async ({ client }) => {
     "experimental.chat.messages.transform": async (_input, output) => {
       try {
         const result = await compact(output.messages, { ...options, log })
-        if (result.changed) output.messages = result.messages
+        // opencode discards the hook's return value and keeps using its own
+        // array reference, so the result must be spliced in place, not assigned.
+        if (result.changed) output.messages.splice(0, output.messages.length, ...result.messages)
         else if (options.debug && result.skipped) log("debug", `skipped: ${result.skipped}`)
       } catch (error) {
         // Never break a session because compaction failed.
