@@ -23,7 +23,7 @@ export type JevAnswer = { noul?: number }
 /** Only the subset of the System One response this plugin consumes. */
 export type JevResponse = { answers?: Record<string, JevAnswer> }
 
-export type JevAsker = (state: string, questions: Record<string, JevQuestion>) => Promise<JevResponse>
+export type JevAsker = (state: string, questions: Record<string, JevQuestion>, signal?: AbortSignal) => Promise<JevResponse>
 
 export type CompactionOptions = {
   enabled: boolean
@@ -190,7 +190,9 @@ function estimateCharsTokens(chars: number): number {
 /** Estimated context tokens for one part, including any tool attachments. */
 function estimatePartTokens(part: Part, role: Message["role"]): number {
   if (isToolPart(part) && part.state.status === "completed") {
-    if (part.state.time.compacted) return estimateTokens(CLEARED_MARKER)
+    // Cleared: the output is a marker and attachments are dropped, but opencode
+    // still sends the tool name and input.
+    if (part.state.time.compacted) return estimateTokens(partText(part, role))
     const attachmentChars = (part.state.attachments ?? []).reduce((sum, file) => sum + (file.url?.length ?? 0), 0)
     return estimateTokens(partText(part, role)) + estimateCharsTokens(attachmentChars)
   }
@@ -318,10 +320,14 @@ function safeBaseUrl(url: string): string {
 }
 
 export async function defaultAsk(options: CompactionOptions): Promise<JevAsker> {
-  return async (state, questions) => {
+  return async (state, questions, signal) => {
     if (!options.apiKey) throw new Error("TYPESAFE_API_KEY is not set")
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_OPTIONS.timeoutMs)
+    if (signal) {
+      if (signal.aborted) controller.abort()
+      else signal.addEventListener("abort", () => controller.abort(), { once: true })
+    }
     try {
       const response = await fetch(safeBaseUrl(options.baseUrl), {
         method: "POST",
@@ -438,6 +444,7 @@ async function mapLimit<T, R>(
   items: T[],
   limit: number,
   deadline: number,
+  signal: AbortSignal,
   run: (item: T) => Promise<R>,
 ): Promise<PromiseSettledResult<R>[]> {
   const results: PromiseSettledResult<R>[] = new Array(items.length)
@@ -447,7 +454,7 @@ async function mapLimit<T, R>(
       const index = next++
       if (index >= items.length) return
       const remaining = deadline - Date.now()
-      if (remaining <= 0) {
+      if (remaining <= 0 || signal.aborted) {
         results[index] = { status: "rejected", reason: new Error("jev-compaction total deadline exceeded") }
         continue
       }
@@ -505,12 +512,23 @@ export async function compact(messages: Msg[], options: CompactionOptions): Prom
   // waves x timeoutMs. Each task is awaited inside mapLimit's try/catch, so a
   // synchronous throw becomes a handled rejection.
   const deadline = Date.now() + (options.totalTimeoutMs ?? DEFAULT_OPTIONS.totalTimeoutMs)
-  const settled = await mapLimit(
-    jobs,
-    options.maxConcurrentRequests ?? DEFAULT_OPTIONS.maxConcurrentRequests,
-    deadline,
-    ({ batch, start }) => ask(fitted, questionsFor(batch, start).questions),
-  )
+  // The controller is aborted at the overall deadline and its signal is threaded
+  // into the asker, so an in-flight request is actually cancelled rather than
+  // merely abandoned by the race.
+  const deadlineController = new AbortController()
+  const deadlineTimer = setTimeout(() => deadlineController.abort(), Math.max(0, deadline - Date.now()))
+  let settled: PromiseSettledResult<JevResponse>[]
+  try {
+    settled = await mapLimit(
+      jobs,
+      options.maxConcurrentRequests ?? DEFAULT_OPTIONS.maxConcurrentRequests,
+      deadline,
+      deadlineController.signal,
+      ({ batch, start }) => ask(fitted, questionsFor(batch, start).questions, deadlineController.signal),
+    )
+  } finally {
+    clearTimeout(deadlineTimer)
+  }
 
   const decisions = new Map<string, Decision>()
   for (const [jobIndex, { batch, start }] of jobs.entries()) {

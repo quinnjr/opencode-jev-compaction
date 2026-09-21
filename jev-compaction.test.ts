@@ -235,6 +235,16 @@ describe("estimate / build / collect", () => {
     expect(buildState(messages, 6)).not.toContain("[file")
   })
 
+  test("ignores directory file parts", () => {
+    const messages = [
+      {
+        info: { role: "user", id: "u0" } as any,
+        parts: [{ type: "file", id: "f1", mime: "application/x-directory", url: "A".repeat(40000) } as any],
+      },
+    ]
+    expect(buildState(messages, 6)).not.toContain("[file")
+  })
+
   test("includes file names and abridged reasoning in the state", () => {
     const messages = [
       { info: { role: "assistant", id: "a1" } as any, parts: [{ type: "file", id: "f1", filename: "src/a.ts", url: "x" } as any] },
@@ -496,6 +506,26 @@ describe("applyDecisions", () => {
     const output = (result.messages[0].parts[0] as any).state.output
     expect(output).toContain("re-run Read #1 assistant (pinned)")
     expect(output).not.toMatch(/^#1 assistant/m)
+  })
+
+  test("does not re-truncate a result opencode already cleared", () => {
+    const part = {
+      info: { role: "assistant", id: "m1" } as any,
+      parts: [
+        {
+          type: "tool",
+          id: "c1",
+          callID: "c1",
+          tool: "Read",
+          state: { status: "completed", input: {}, output: big(1000), title: "Read", metadata: {}, attachments: [{ type: "file", id: "f1" }], time: { start: 0, end: 1, compacted: 1 } },
+        } as any,
+      ],
+    }
+    const decisions = new Map([["c1", { keepCall: true, keepResult: false }]])
+    const result = applyDecisions([part], decisions, 100)
+    expect(result.truncated).toBe(0)
+    expect(result.changed).toBe(false)
+    expect(result.messages[0]).toBe(part)
   })
 
   test("missing decisions keep everything without churn", () => {
@@ -922,6 +952,18 @@ describe("compact", () => {
     expect(result.skipped).toBe("under threshold")
   })
 
+  test("does not count directory file parts in the gate", async () => {
+    const messages = [
+      userText("u0", "go"),
+      {
+        info: { role: "user", id: "m1" } as any,
+        parts: [{ type: "file", id: "f1", mime: "application/x-directory", url: "A".repeat(40000) } as any],
+      },
+    ]
+    const result = await compact(messages, opts({ ask: async () => ({ answers: {} }), preserveRecent: 0, threshold: 5000 }))
+    expect(result.skipped).toBe("under threshold")
+  })
+
   test("keeps calls when the asker throws", async () => {
     const boom: JevAsker = async () => {
       throw new Error("network down")
@@ -1021,6 +1063,18 @@ describe("defaultAsk", () => {
     globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => ({ answers: {} }) })) as any
     const ask = await defaultAsk(opts({ baseUrl: "http://127.0.0.1:8080/systemone" }))
     await expect(ask("s", {})).resolves.toEqual({ answers: {} })
+  })
+
+  test("aborts when the shared signal fires", async () => {
+    const shared = new AbortController()
+    globalThis.fetch = ((_url: any, init: any) =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener("abort", () => reject(new Error("shared abort")))
+      })) as any
+    const ask = await defaultAsk(opts({ timeoutMs: 100000 }))
+    const pending = ask("s", {}, shared.signal)
+    shared.abort()
+    await expect(pending).rejects.toThrow("shared abort")
   })
 
   test("sends a hardened request", async () => {
