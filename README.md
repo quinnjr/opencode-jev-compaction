@@ -27,7 +27,9 @@ before each request to the model.
    sent. Abridged user, assistant, and reasoning text (head 600 + tail 300
    characters per part) plus up to 200 characters of each tool input *are*
    sent, unless `JEV_STATE_INCLUDE_TEXT=0` restricts the state to tool
-   metadata only. See [Data sent to Jev](#data-sent-to-jev).
+   metadata only. If the state still exceeds `maxStateTokens`, long lines are
+   cut further (head 120 + tail 60); if it cannot be fitted, compaction is
+   skipped for that turn. See [Data sent to Jev](#data-sent-to-jev).
 4. For every non-pinned tool call, ask two `noul` questions in one batched
    request: *should the call stay* and *should the result stay verbatim*.
 5. Decide against `JEV_KEEP_THRESHOLD` (default 0.5):
@@ -37,12 +39,12 @@ before each request to the model.
    - else → remove the call together with its result.
 6. A message left with no parts is dropped.
 
-Any failure — missing key, network error, unparseable response, or a history
-that cannot be fitted into the state budget — leaves the messages exactly as
-they were. A session is never broken because compaction failed. Failures and
-per-batch problems are logged as warnings; routine skips (under threshold, no
-candidates, state too large, no request budget) are logged at debug level, so
-set `JEV_COMPACTION_DEBUG=1` to see why nothing happened.
+Failures never break a session. A missing key, an unfittable history, or an
+error before batching leaves every message untouched; when only some batches
+fail, those batches' calls are kept while the other batches' decisions still
+apply. Failures and per-batch problems are logged as warnings; routine skips
+(under threshold, no candidates, state too large, no request budget) are logged
+at debug level, so set `JEV_COMPACTION_DEBUG=1` to see why nothing happened.
 
 ## Requirements
 

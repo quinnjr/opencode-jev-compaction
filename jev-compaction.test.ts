@@ -251,6 +251,66 @@ describe("applyDecisions", () => {
     expect((result.messages[0].parts[0] as any).type).toBe("text")
   })
 
+  test("never drops an in-flight tool part", () => {
+    const original = tool("m1", "c1", "Bash", {}, "raw", "pending")
+    const decisions = new Map([["c1", { keepCall: false, keepResult: false }]])
+    const result = applyDecisions([original], decisions, 100)
+    expect(result.removed).toBe(0)
+    expect(result.messages[0]).toBe(original)
+  })
+
+  test("truncates the interrupted output opencode actually sends", () => {
+    const part = {
+      info: { role: "assistant", id: "m1" } as any,
+      parts: [
+        {
+          type: "tool",
+          id: "c1",
+          callID: "c1",
+          tool: "Bash",
+          state: {
+            status: "error",
+            input: {},
+            error: "Tool execution aborted",
+            metadata: { interrupted: true, output: big(1000) },
+            time: { start: 0, end: 1 },
+          },
+        } as any,
+      ],
+    }
+    const decisions = new Map([["c1", { keepCall: true, keepResult: false }]])
+    const result = applyDecisions([part], decisions, 100)
+    const state: any = (result.messages[0].parts[0] as any).state
+    expect(state.metadata.output.length).toBeLessThan(1000)
+    expect(state.metadata.output).toContain("chars omitted")
+  })
+
+  test("drops attachments when truncating a completed result", () => {
+    const part = {
+      info: { role: "assistant", id: "m1" } as any,
+      parts: [
+        {
+          type: "tool",
+          id: "c1",
+          callID: "c1",
+          tool: "Read",
+          state: {
+            status: "completed",
+            input: {},
+            output: big(1000),
+            title: "Read",
+            metadata: {},
+            attachments: [{ type: "file", id: "f1" }],
+            time: { start: 0, end: 1 },
+          },
+        } as any,
+      ],
+    }
+    const decisions = new Map([["c1", { keepCall: true, keepResult: false }]])
+    const result = applyDecisions([part], decisions, 100)
+    expect((result.messages[0].parts[0] as any).state.attachments).toBeUndefined()
+  })
+
   test("missing decisions keep everything without churn", () => {
     const result = applyDecisions(messages, new Map(), 100)
     expect(result.changed).toBe(false)

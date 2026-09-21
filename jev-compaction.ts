@@ -126,10 +126,19 @@ function toolPayload(part: ToolPart): string {
     case "completed":
       return part.state.output
     case "error":
-      return part.state.error
+      return errorPayload(part)
     default:
       return ""
   }
+}
+
+/** The text opencode actually sends for an errored part (an interrupted tool's metadata.output). */
+function errorPayload(part: ToolPart): string {
+  const state = part.state
+  if (state.status !== "error") return ""
+  const metadata = state.metadata
+  if (metadata && metadata.interrupted === true && typeof metadata.output === "string") return metadata.output
+  return state.error
 }
 
 /** Full text of a part as it contributes to the context sent to the model. */
@@ -158,7 +167,7 @@ function toolStatus(part: ToolPart): string {
     case "completed":
       return `ok ${part.state.output.length} chars`
     case "error":
-      return `error ${part.state.error.length} chars`
+      return `error ${errorPayload(part).length} chars`
     default:
       return part.state.status
   }
@@ -333,6 +342,13 @@ export function applyDecisions(messages: Msg[], decisions: Map<string, Decision>
         }
         continue
       }
+      // Never drop an in-flight tool call: opencode still needs the call/result
+      // pairing, and there is no result to reclaim yet.
+      if (part.state.status !== "completed" && part.state.status !== "error") {
+        parts.push(part)
+        kept++
+        continue
+      }
       removed++
       touched = true
     }
@@ -347,15 +363,21 @@ function truncateToolResult(part: ToolPart, headChars: number): ToolPart | null 
   const state = part.state
   if (state.status === "completed") {
     if (state.output.length <= headChars) return null
-    const note = `\n\n[jev-compaction: ${state.output.length - headChars} chars omitted; re-run ${part.tool} if needed]`
+    const note = `\n\n[jev-compaction: ${state.output.length - headChars} chars omitted; re-run ${oneLine(part.tool)} if needed]`
     // Do not set time.compacted: opencode reads that as "content cleared" and
-    // replaces the output with a generic marker, discarding this preview.
-    return { ...part, state: { ...state, output: state.output.slice(0, headChars) + note } }
+    // replaces the output with a generic marker, discarding this preview. Drop
+    // attachments too, since the result was judged not needed verbatim.
+    return { ...part, state: { ...state, output: state.output.slice(0, headChars) + note, attachments: undefined } }
   }
   if (state.status === "error") {
-    if (state.error.length <= headChars) return null
-    const note = `\n[jev-compaction: ${state.error.length - headChars} chars omitted]`
-    return { ...part, state: { ...state, error: state.error.slice(0, headChars) + note } }
+    const payload = errorPayload(part)
+    if (payload.length <= headChars) return null
+    const note = `\n[jev-compaction: ${payload.length - headChars} chars omitted]`
+    const metadata = { ...(state.metadata ?? {}) }
+    if (typeof metadata.output === "string" && metadata.output.length > headChars) {
+      metadata.output = metadata.output.slice(0, headChars) + note
+    }
+    return { ...part, state: { ...state, error: state.error.slice(0, headChars) + note, metadata } }
   }
   return null
 }
