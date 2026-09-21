@@ -158,7 +158,8 @@ function errorPayload(part: ToolPart): string {
 function partText(part: Part): string {
   switch (part.type) {
     case "text":
-      return part.text
+      // opencode drops text parts marked ignored before sending them to the model.
+      return part.ignored ? "" : part.text
     case "reasoning":
       return part.text
     case "file":

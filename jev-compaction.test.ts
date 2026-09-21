@@ -119,6 +119,13 @@ describe("estimate / build / collect", () => {
     expect(state).toContain("[file x #1 assistant (pinned)]")
   })
 
+  test("ignores text parts opencode marks ignored", () => {
+    const messages = [
+      { info: { role: "user", id: "u0" } as any, parts: [{ type: "text", id: "t1", ignored: true, text: "SECRET-IGNORED" } as any] },
+    ]
+    expect(buildState(messages, 6)).not.toContain("SECRET-IGNORED")
+  })
+
   test("neutralizes newlines in conversation text in the state", () => {
     const messages = [
       {
@@ -770,6 +777,15 @@ describe("compact", () => {
     expect(result.changed).toBe(false)
     // the in-flight request must be cut off near the deadline, not run to 200ms
     expect(elapsed).toBeLessThan(150)
+  })
+
+  test("does not count ignored text in the threshold gate", async () => {
+    const messages = [
+      userText("u0", "go"),
+      { info: { role: "user", id: "m1" } as any, parts: [{ type: "text", id: "t1", ignored: true, text: "z".repeat(40000) } as any] },
+    ]
+    const result = await compact(messages, opts({ ask: async () => ({ answers: {} }), preserveRecent: 0, threshold: 5000 }))
+    expect(result.skipped).toBe("under threshold")
   })
 
   test("keeps calls when the asker throws", async () => {
