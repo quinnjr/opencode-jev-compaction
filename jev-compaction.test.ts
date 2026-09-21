@@ -940,6 +940,50 @@ describe("compact", () => {
     expect(result.skipped).toBe("under threshold")
   })
 
+  test("still counts a cleared result's input in the threshold gate", async () => {
+    const part = {
+      info: { role: "assistant", id: "m1" } as any,
+      parts: [
+        {
+          type: "tool",
+          id: "c1",
+          callID: "c1",
+          tool: "Read",
+          state: {
+            status: "completed",
+            input: { content: "A".repeat(40000) },
+            output: big(100),
+            title: "Read",
+            metadata: {},
+            time: { start: 0, end: 1, compacted: 123 },
+          },
+        } as any,
+      ],
+    }
+    const result = await compact([userText("u0", "go"), part], opts({ ask: async () => ({ answers: {} }), preserveRecent: 0, threshold: 5000 }))
+    expect(result.skipped).not.toBe("under threshold")
+  })
+
+  test("threads the deadline signal into the asker", async () => {
+    let captured: AbortSignal | undefined
+    const ask: JevAsker = async (_state, _questions, signal) => {
+      captured = signal
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      return { answers: {} }
+    }
+    const messages = [
+      userText("u0", "go"),
+      ...Array.from({ length: 4 }, (_, i) => tool(`m${i + 1}`, `c${i}`, "Read", { file: "x".repeat(40) }, big(2000))),
+      assistantText("a5", "done"),
+    ]
+    await compact(
+      messages,
+      opts({ ask, preserveRecent: 1, threshold: 0, maxRequestTokens: 400, maxConcurrentRequests: 1, totalTimeoutMs: 30 }),
+    )
+    expect(captured).toBeDefined()
+    expect(captured!.aborted).toBe(true)
+  })
+
   test("does not count inlined text/plain file parts in the gate", async () => {
     const messages = [
       userText("u0", "go"),
@@ -1075,6 +1119,19 @@ describe("defaultAsk", () => {
     const pending = ask("s", {}, shared.signal)
     shared.abort()
     await expect(pending).rejects.toThrow("shared abort")
+  })
+
+  test("cancels immediately when the signal is already aborted", async () => {
+    let sawAborted = false
+    globalThis.fetch = ((_url: any, init: any) => {
+      sawAborted = init.signal.aborted
+      return Promise.reject(new Error("aborted"))
+    }) as any
+    const controller = new AbortController()
+    controller.abort()
+    const ask = await defaultAsk(opts())
+    await expect(ask("s", {}, controller.signal)).rejects.toThrow()
+    expect(sawAborted).toBe(true)
   })
 
   test("sends a hardened request", async () => {

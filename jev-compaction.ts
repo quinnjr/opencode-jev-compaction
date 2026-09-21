@@ -528,6 +528,9 @@ export async function compact(messages: Msg[], options: CompactionOptions): Prom
     )
   } finally {
     clearTimeout(deadlineTimer)
+    // The race may have abandoned a request before its expiry timer fired;
+    // abort unconditionally so any such request is actually cancelled.
+    deadlineController.abort()
   }
 
   const decisions = new Map<string, Decision>()
