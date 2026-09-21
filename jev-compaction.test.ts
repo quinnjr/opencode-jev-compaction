@@ -186,6 +186,8 @@ describe("applyDecisions", () => {
     const bashState: any = (result.messages[2].parts[0] as any).state
     expect(bashState.output.length).toBeLessThan(1000)
     expect(bashState.output).toContain("chars omitted")
+    // must not mark compacted: opencode would replace the preview with a marker
+    expect(bashState.time.compacted).toBeUndefined()
   })
 
   test("keepResult is authoritative even when keepCall is false", () => {
@@ -447,6 +449,15 @@ describe("compact", () => {
     const infResult = await compact(history(), opts({ ask: inf, preserveRecent: 1 }))
     expect(infResult.changed).toBe(false)
     expect(infResult.removed).toBe(0)
+
+    const outOfRange: JevAsker = async (_state, questions) => {
+      const answers: Record<string, { noul: number }> = {}
+      for (const key of Object.keys(questions)) answers[key] = { noul: -0.5 }
+      return { answers }
+    }
+    const rangeResult = await compact(history(), opts({ ask: outOfRange, preserveRecent: 1 }))
+    expect(rangeResult.changed).toBe(false)
+    expect(rangeResult.removed).toBe(0)
   })
 
   test("omits conversation text from the state when sendText is off", async () => {

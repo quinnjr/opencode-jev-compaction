@@ -292,8 +292,9 @@ export async function defaultAsk(options: CompactionOptions): Promise<JevAsker> 
 
 function answerNoul(response: JevResponse | null | undefined, key: string): number | undefined {
   const value = response?.answers?.[key]?.noul
-  // Non-finite (NaN, ±Infinity) is not a usable probability; treat it as unanswered.
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+  // Only a real probability counts; NaN/±Infinity and out-of-range values are
+  // treated as unanswered, which fails open to "keep".
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : undefined
 }
 
 export type ApplyResult = { messages: Msg[]; changed: boolean; kept: number; truncated: number; removed: number }
@@ -347,10 +348,9 @@ function truncateToolResult(part: ToolPart, headChars: number): ToolPart | null 
   if (state.status === "completed") {
     if (state.output.length <= headChars) return null
     const note = `\n\n[jev-compaction: ${state.output.length - headChars} chars omitted; re-run ${part.tool} if needed]`
-    return {
-      ...part,
-      state: { ...state, output: state.output.slice(0, headChars) + note, time: { ...state.time, compacted: Date.now() } },
-    }
+    // Do not set time.compacted: opencode reads that as "content cleared" and
+    // replaces the output with a generic marker, discarding this preview.
+    return { ...part, state: { ...state, output: state.output.slice(0, headChars) + note } }
   }
   if (state.status === "error") {
     if (state.error.length <= headChars) return null
