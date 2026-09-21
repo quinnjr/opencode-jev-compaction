@@ -250,7 +250,7 @@ export function buildState(messages: Msg[], preserveRecent: number, sendText = t
     lines.push(`#${index} ${message.info.role}${pinned ? " (pinned)" : ""}`)
     for (const part of message.parts) {
       if (part.type === "tool") {
-        const input = summarize(JSON.stringify(part.state.input ?? {}), TOOL_INPUT_STATE_CHARS)
+        const input = stateLine(summarize(JSON.stringify(part.state.input ?? {}), TOOL_INPUT_STATE_CHARS))
         lines.push(`  call ${oneLine(part.tool)} input=${input} -> ${toolStatus(part)}`)
       } else if (sendText && !isInlinedFile(part)) {
         const text = stateLine(partText(part, message.info.role).trim())
