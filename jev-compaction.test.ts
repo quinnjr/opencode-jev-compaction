@@ -39,14 +39,16 @@ function tool(
   tool: string,
   input: Record<string, unknown>,
   output: string,
-  status: "completed" | "error" | "pending" = "completed",
+  status: "completed" | "error" | "pending" | "running" = "completed",
 ) {
   const state =
     status === "completed"
       ? { status, input, output, title: tool, metadata: {}, time: { start: 0, end: 1 } }
       : status === "error"
         ? { status, input, error: output, metadata: {}, time: { start: 0, end: 1 } }
-        : { status, input, raw: output }
+        : status === "running"
+          ? { status, input, raw: output, time: { start: 0 } }
+          : { status, input, raw: output }
   return {
     info: { role: "assistant", id: messageID } as any,
     parts: [{ type: "tool", id: callID, callID, tool, state, sessionID: "s", messageID } as any],
@@ -189,6 +191,48 @@ describe("estimate / build / collect", () => {
       ],
     }
     expect(buildState([nonString], 6)).toContain("error 500 chars")
+
+    const noMetadata = {
+      info: { role: "assistant", id: "m3" } as any,
+      parts: [
+        {
+          type: "tool",
+          id: "c3",
+          callID: "c3",
+          tool: "Bash",
+          state: { status: "error", input: {}, error: big(500), time: { start: 0, end: 1 } },
+        } as any,
+      ],
+    }
+    expect(buildState([noMetadata], 6)).toContain("error 500 chars")
+  })
+
+  test("treats a result opencode already cleared as cleared", () => {
+    const part = {
+      info: { role: "assistant", id: "m1" } as any,
+      parts: [
+        {
+          type: "tool",
+          id: "c1",
+          callID: "c1",
+          tool: "Read",
+          state: { status: "completed", input: {}, output: big(4000), title: "Read", metadata: {}, time: { start: 0, end: 1, compacted: 123 } },
+        } as any,
+      ],
+    }
+    const state = buildState([part], 6)
+    expect(state).toContain("cleared")
+    expect(state).not.toContain("ok 4000 chars")
+  })
+
+  test("ignores inlined text/plain file parts", () => {
+    const messages = [
+      {
+        info: { role: "user", id: "u0" } as any,
+        parts: [{ type: "file", id: "f1", mime: "text/plain", url: "data:text/plain;base64," + "A".repeat(40000) } as any],
+      },
+    ]
+    expect(buildState(messages, 6)).not.toContain("[file")
   })
 
   test("includes file names and abridged reasoning in the state", () => {
@@ -353,6 +397,14 @@ describe("applyDecisions", () => {
 
   test("never drops an in-flight tool part", () => {
     const original = tool("m1", "c1", "Bash", {}, "raw", "pending")
+    const decisions = new Map([["c1", { keepCall: false, keepResult: false }]])
+    const result = applyDecisions([original], decisions, 100)
+    expect(result.removed).toBe(0)
+    expect(result.messages[0]).toBe(original)
+  })
+
+  test("never drops a running tool part", () => {
+    const original = tool("m1", "c1", "Bash", {}, "raw", "running")
     const decisions = new Map([["c1", { keepCall: false, keepResult: false }]])
     const result = applyDecisions([original], decisions, 100)
     expect(result.removed).toBe(0)
@@ -839,6 +891,35 @@ describe("compact", () => {
     ]
     const result = await compact(messages, opts({ ask: async () => ({ answers: {} }), preserveRecent: 0, threshold: 5000 }))
     expect(result.skipped).not.toBe("under threshold")
+  })
+
+  test("does not count a cleared result in the threshold gate", async () => {
+    const part = {
+      info: { role: "assistant", id: "m1" } as any,
+      parts: [
+        {
+          type: "tool",
+          id: "c1",
+          callID: "c1",
+          tool: "Read",
+          state: { status: "completed", input: {}, output: big(40000), title: "Read", metadata: {}, time: { start: 0, end: 1, compacted: 123 } },
+        } as any,
+      ],
+    }
+    const result = await compact([userText("u0", "go"), part], opts({ ask: async () => ({ answers: {} }), preserveRecent: 0, threshold: 5000 }))
+    expect(result.skipped).toBe("under threshold")
+  })
+
+  test("does not count inlined text/plain file parts in the gate", async () => {
+    const messages = [
+      userText("u0", "go"),
+      {
+        info: { role: "user", id: "m1" } as any,
+        parts: [{ type: "file", id: "f1", mime: "text/plain", url: "data:text/plain;base64," + "A".repeat(40000) } as any],
+      },
+    ]
+    const result = await compact(messages, opts({ ask: async () => ({ answers: {} }), preserveRecent: 0, threshold: 5000 }))
+    expect(result.skipped).toBe("under threshold")
   })
 
   test("keeps calls when the asker throws", async () => {

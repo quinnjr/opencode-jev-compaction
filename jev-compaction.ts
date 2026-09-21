@@ -84,6 +84,11 @@ const STATE_LINE_HEAD = 120
 const STATE_LINE_TAIL = 60
 const QUESTION_OVERHEAD_TOKENS = 120
 
+/** What opencode substitutes for a result it has already pruned (message-v2.ts). */
+const CLEARED_MARKER = "[Old tool result content cleared]"
+/** File mimes opencode delivers as synthetic text parts instead of sending the file itself. */
+const INLINED_FILE_MIMES = new Set(["text/plain", "application/x-directory"])
+
 export function optionsFromEnv(
   env: Record<string, string | undefined> = (globalThis as { process?: { env?: Record<string, string | undefined> } })
     .process?.env ?? {},
@@ -137,13 +142,15 @@ function abridge(text: string, head: number, tail: number): string {
 function toolPayload(part: ToolPart): string {
   switch (part.state.status) {
     case "completed":
-      return part.state.output
+      return part.state.time.compacted ? CLEARED_MARKER : part.state.output
     case "error":
       return errorPayload(part)
     default:
       return ""
   }
 }
+
+const isInlinedFile = (part: Part): boolean => part.type === "file" && INLINED_FILE_MIMES.has(part.mime)
 
 /** The text opencode actually sends for an errored part (an interrupted tool's metadata.output). */
 function errorPayload(part: ToolPart): string {
@@ -173,23 +180,31 @@ function partText(part: Part, role: Message["role"]): string {
 
 /** Character-based estimate; deliberately not a tokenizer (see README caveats). */
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4)
+  return estimateCharsTokens(text.length)
+}
+
+function estimateCharsTokens(chars: number): number {
+  return Math.ceil(chars / 4)
 }
 
 /** Estimated context tokens for one part, including any tool attachments. */
 function estimatePartTokens(part: Part, role: Message["role"]): number {
   if (isToolPart(part) && part.state.status === "completed") {
+    if (part.state.time.compacted) return estimateTokens(CLEARED_MARKER)
     const attachmentChars = (part.state.attachments ?? []).reduce((sum, file) => sum + (file.url?.length ?? 0), 0)
-    return estimateTokens(partText(part, role)) + Math.ceil(attachmentChars / 4)
+    return estimateTokens(partText(part, role)) + estimateCharsTokens(attachmentChars)
   }
-  if (part.type === "file") return estimateTokens(partText(part, role)) + Math.ceil((part.url?.length ?? 0) / 4)
+  if (part.type === "file") {
+    if (isInlinedFile(part)) return 0
+    return estimateTokens(partText(part, role)) + estimateCharsTokens(part.url?.length ?? 0)
+  }
   return estimateTokens(partText(part, role))
 }
 
 function toolStatus(part: ToolPart): string {
   switch (part.state.status) {
     case "completed":
-      return `ok ${part.state.output.length} chars`
+      return part.state.time.compacted ? "cleared" : `ok ${part.state.output.length} chars`
     case "error":
       return `error ${errorPayload(part).length} chars`
     default:
@@ -225,7 +240,7 @@ export function buildState(messages: Msg[], preserveRecent: number, sendText = t
       if (part.type === "tool") {
         const input = summarize(JSON.stringify(part.state.input ?? {}), TOOL_INPUT_STATE_CHARS)
         lines.push(`  call ${oneLine(part.tool)} input=${input} -> ${toolStatus(part)}`)
-      } else if (sendText) {
+      } else if (sendText && !isInlinedFile(part)) {
         const text = stateLine(partText(part, message.info.role).trim())
         if (text) lines.push(`  ${stateLine(abridge(text, STATE_TEXT_HEAD, STATE_TEXT_TAIL))}`)
       }
@@ -388,6 +403,8 @@ export function applyDecisions(messages: Msg[], decisions: Map<string, Decision>
 function truncateToolResult(part: ToolPart, headChars: number): ToolPart | null {
   const state = part.state
   if (state.status === "completed") {
+    // opencode already replaced this result with a marker; nothing to reclaim.
+    if (state.time.compacted) return null
     const over = state.output.length > headChars
     const hasAttachments = (state.attachments?.length ?? 0) > 0
     if (!over && !hasAttachments) return null
