@@ -4,9 +4,14 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
-    "skipLibCheck": true,
     "noEmit": true,
-    "types": ["node", "bun"]
+    "types": ["bun"],
+    // Required: bun-types 1.x references node names (TextEncoderEncodeIntoResult,
+    // ConnectionOptions, KeyObject, TLSSocket) that @types/node 22 does not
+    // export, so a clean lib check fails inside node_modules, not our code.
+    // Remove once bun-types and @types/node are mutually compatible; do not
+    // use this flag to hide errors in our own sources.
+    "skipLibCheck": true
   },
   "include": ["*.ts"]
 }

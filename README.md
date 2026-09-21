@@ -21,9 +21,13 @@ before each request to the model.
    (default 15k tokens), do nothing.
 2. Pin the first message and the newest `JEV_PRESERVE_RECENT` (default 6)
    messages. Pinned content is never a candidate.
-3. Build a skeletal view of the conversation — tool outputs replaced by
-   `ok, NNNN chars (omitted)`, long text abridged — and send it to Jev as the
-   `state`.
+3. Build a skeletal view of the conversation and send it to Jev as the
+   `state`. Tool results are replaced by a one-line summary
+   (`call Read input={...} -> ok NNNN chars`) — the result bodies are **not**
+   sent. Abridged user, assistant, and reasoning text (head 600 + tail 300
+   characters per part) plus up to 200 characters of each tool input *are*
+   sent, unless `JEV_STATE_INCLUDE_TEXT=0` restricts the state to tool
+   metadata only. See [Data sent to Jev](#data-sent-to-jev).
 4. For every non-pinned tool call, ask two `noul` questions in one batched
    request: *should the call stay* and *should the result stay verbatim*.
 5. Decide against `JEV_KEEP_THRESHOLD` (default 0.5):
@@ -35,8 +39,10 @@ before each request to the model.
 
 Any failure — missing key, network error, unparseable response, or a history
 that cannot be fitted into the state budget — leaves the messages exactly as
-they were and logs a warning. A session is never broken because compaction
-failed.
+they were. A session is never broken because compaction failed. Failures and
+per-batch problems are logged as warnings; routine skips (under threshold, no
+candidates, state too large, no request budget) are logged at debug level, so
+set `JEV_COMPACTION_DEBUG=1` to see why nothing happened.
 
 ## Requirements
 
@@ -77,8 +83,27 @@ All configuration is environment-based.
 | `JEV_KEEP_THRESHOLD` | `0.5` | Minimum Jev probability for a call or result to stay. |
 | `JEV_TRUNCATE_HEAD_CHARS` | `300` | Characters of a dropped tool result kept as a preview. |
 | `JEV_MODEL` | `jev-latest` | Jev model name. |
-| `JEV_BASE_URL` | `https://api.typesafe.ai/v1/systemone` | System One endpoint. |
+| `JEV_BASE_URL` | `https://api.typesafe.ai/v1/systemone` | System One endpoint. Must be `https://` (or `http://` on loopback); anything else is refused so the bearer token cannot be redirected. |
+| `JEV_TIMEOUT_MS` | `10000` | Abort a Jev request after this many milliseconds so a stalled call cannot block generation. |
+| `JEV_STATE_INCLUDE_TEXT` | `1` | Set to `0` to send only tool metadata as the state, omitting abridged conversation text. |
 | `JEV_COMPACTION_DEBUG` | `0` | Set to `1` for debug logging. |
+
+## Data sent to Jev
+
+When compaction runs, the plugin sends the following to the configured
+`JEV_BASE_URL` (TypeSafe by default):
+
+- **Sent:** the role and index of every message; abridged user/assistant/
+  reasoning text; file names/URLs; every tool's name, a summarised input, and
+  its status/length (`ok 4213 chars`). Tool inputs also appear (up to 300
+  characters) in the per-call question instructions, regardless of
+  `JEV_STATE_INCLUDE_TEXT`.
+- **Not sent:** tool result bodies, file contents, or the raw transcript.
+
+Tool inputs can contain commands, paths, or source snippets, and abridged text
+can contain anything pasted into the chat. If that is not acceptable for your
+codebase, set `JEV_STATE_INCLUDE_TEXT=0` (tool metadata only) or disable the
+plugin with `JEV_COMPACTION_DISABLED=1`.
 
 ## Caveats
 
