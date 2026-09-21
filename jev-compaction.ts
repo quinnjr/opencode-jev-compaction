@@ -282,19 +282,23 @@ export function fitState(state: string, maxStateTokens: number): string | null {
 
 export type Decision = { keepCall: boolean; keepResult: boolean }
 
+// Single source for the question-key protocol, shared by the producer and reader.
+const callKey = (n: number) => `c${n}_keep_call`
+const resultKey = (n: number) => `c${n}_keep_result`
+
 function questionsFor(refs: ToolRef[], offset: number): { questions: Record<string, JevQuestion> } {
   const questions: Record<string, JevQuestion> = {}
   refs.forEach((ref, i) => {
     const n = offset + i
     const tool = JSON.stringify(oneLine(ref.tool))
     const input = summarize(JSON.stringify(ref.input), TOOL_INPUT_QUESTION_CHARS)
-    questions[`c${n}_keep_call`] = {
+    questions[callKey(n)] = {
       type: "noul",
       instructions:
         `The tool call #${n} (${tool}, input ${input}) was made earlier in this session. ` +
         `Remembering that this call happened, with this input, still matters for completing the current task.`,
     }
-    questions[`c${n}_keep_result`] = {
+    questions[resultKey(n)] = {
       type: "noul",
       instructions:
         `The result of tool call #${n} (${tool}) is still needed verbatim to continue this task, ` +
@@ -565,8 +569,8 @@ export async function compact(messages: Msg[], options: CompactionOptions): Prom
     let answered = 0
     batch.forEach((ref, i) => {
       const n = start + i
-      const keepResult = answerNoul(response, `c${n}_keep_result`)
-      const keepCall = answerNoul(response, `c${n}_keep_call`)
+      const keepResult = answerNoul(response, resultKey(n))
+      const keepCall = answerNoul(response, callKey(n))
       if (keepResult !== undefined || keepCall !== undefined) answered++
       // An unanswered question means "avoid deleting": keep.
       decisions.set(ref.id, {
