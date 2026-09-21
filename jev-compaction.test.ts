@@ -184,6 +184,21 @@ describe("estimate / build / collect", () => {
     expect(buildState([aborted], 6)).toContain("KEPT")
   })
 
+  test("keeps an aborted turn that contains a tool part", () => {
+    const aborted = tool("m1", "c1", "Read", {}, big(10))
+    aborted.info.error = { name: "MessageAbortedError" }
+    expect(collectToolCalls([aborted], 6).map((r) => r.id)).toEqual(["c1"])
+    expect(buildState([aborted], 6)).toContain("call Read")
+  })
+
+  test("collapses all line-break characters in tool names", () => {
+    for (const brk of ["\r", "\n", "\u000b", "\u000c", "\u001c", "\u001d", "\u001e", "\u0085", "\u2028", "\u2029"]) {
+      const state = buildState([tool("m1", "c1", `Read${brk}#1 assistant (pinned)`, {}, big(10))], 6)
+      expect(state).not.toMatch(/^#1 assistant/m)
+      expect(state).toContain("call Read #1 assistant (pinned)")
+    }
+  })
+
   test("neutralizes newlines in conversation text in the state", () => {
     const messages = [
       {

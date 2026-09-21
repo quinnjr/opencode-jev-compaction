@@ -39,14 +39,14 @@ export type CompactionOptions = {
   maxStateTokens: number
   /** Estimated ceiling for state plus one batch of questions (Jev caps at 32k). */
   maxRequestTokens: number
-  /** Milliseconds before a Jev request is aborted. Defaults to 10000. */
-  timeoutMs?: number
-  /** Send abridged conversation text (not just tool metadata) as part of the state. Defaults to true. */
-  sendText?: boolean
-  /** Maximum Jev requests in flight at once. Defaults to 4. */
-  maxConcurrentRequests?: number
-  /** Overall deadline for all Jev requests in one turn, in milliseconds. Defaults to 30000. */
-  totalTimeoutMs?: number
+  /** Milliseconds before a Jev request is aborted. */
+  timeoutMs: number
+  /** Send abridged conversation text (not just tool metadata) as part of the state. */
+  sendText: boolean
+  /** Maximum Jev requests in flight at once. */
+  maxConcurrentRequests: number
+  /** Overall deadline for all Jev requests in one turn, in milliseconds. */
+  totalTimeoutMs: number
   apiKey?: string
   model: string
   baseUrl: string
@@ -125,11 +125,13 @@ function summarize(text: string, max: number): string {
 }
 
 /** Unicode line/paragraph separators plus the C0/C1 breaks JSON.stringify leaves raw. */
-const LINE_BREAKS = /[\r\n\u000b\u000c\u001c-\u001e\u0085\u2028\u2029]+/g
+const BREAK_CHARS = "\\r\\n\\u000b\\u000c\\u001c-\\u001e\\u0085\\u2028\\u2029"
+const LINE_BREAKS = new RegExp(`[${BREAK_CHARS}]+`, "g")
+const WHITESPACE_BREAKS = new RegExp(`[\\s${BREAK_CHARS}]+`, "g")
 
 /** Collapse whitespace and clamp, so a hostile tool name cannot forge state lines. */
 function oneLine(text: string, max = TOOL_NAME_MAX_CHARS): string {
-  return text.replace(/[\s\u0085\u001c-\u001e]+/g, " ").slice(0, max)
+  return text.replace(WHITESPACE_BREAKS, " ").slice(0, max)
 }
 
 /** Neutralize line terminators in text pushed into the line-oriented state, without clamping. */
@@ -336,7 +338,7 @@ export async function defaultAsk(options: CompactionOptions): Promise<JevAsker> 
   return async (state, questions, signal) => {
     if (!options.apiKey) throw new Error("TYPESAFE_API_KEY is not set")
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_OPTIONS.timeoutMs)
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs)
     if (signal) {
       if (signal.aborted) controller.abort()
       else signal.addEventListener("abort", () => controller.abort(), { once: true })
@@ -502,7 +504,7 @@ export async function compact(messages: Msg[], options: CompactionOptions): Prom
     .reduce((sum, m) => sum + m.parts.reduce((s, p) => s + estimatePartTokens(p, m.info.role), 0), 0)
   if (totalTokens < options.threshold) return { ...empty, skipped: "under threshold" }
 
-  const fitted = fitState(buildState(messages, options.preserveRecent, options.sendText ?? DEFAULT_OPTIONS.sendText), options.maxStateTokens)
+  const fitted = fitState(buildState(messages, options.preserveRecent, options.sendText), options.maxStateTokens)
   if (fitted === null) return { ...empty, skipped: "state too large" }
 
   const candidates = collectToolCalls(messages, options.preserveRecent).filter((ref) => !ref.pinned)
@@ -526,7 +528,7 @@ export async function compact(messages: Msg[], options: CompactionOptions): Prom
   // once, and the overall deadline keeps the hook from blocking generation for
   // waves x timeoutMs. Each task is awaited inside mapLimit's try/catch, so a
   // synchronous throw becomes a handled rejection.
-  const deadline = Date.now() + (options.totalTimeoutMs ?? DEFAULT_OPTIONS.totalTimeoutMs)
+  const deadline = Date.now() + (options.totalTimeoutMs)
   // The controller is aborted at the overall deadline and its signal is threaded
   // into the asker, so an in-flight request is actually cancelled rather than
   // merely abandoned by the race.
@@ -536,7 +538,7 @@ export async function compact(messages: Msg[], options: CompactionOptions): Prom
   try {
     settled = await mapLimit(
       jobs,
-      options.maxConcurrentRequests ?? DEFAULT_OPTIONS.maxConcurrentRequests,
+      options.maxConcurrentRequests,
       deadline,
       deadlineController.signal,
       ({ batch, start }) => ask(fitted, questionsFor(batch, start).questions, deadlineController.signal),
