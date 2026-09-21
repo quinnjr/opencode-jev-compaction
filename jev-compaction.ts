@@ -13,7 +13,7 @@
 // Failures are always non-fatal: if Jev is unreachable, unconfigured, slow, or
 // the history cannot be fitted, the messages are left exactly as they were.
 
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import type { Message, Part, ToolPart } from "@opencode-ai/sdk"
 
 export type Msg = { info: Message; parts: Part[] }
@@ -476,4 +476,9 @@ export const JevCompactionPlugin: Plugin = async ({ client }) => {
   }
 }
 
-export default JevCompactionPlugin
+// opencode's loader (readV1Plugin) only accepts a default export that is an
+// object carrying `id`/`server`. A bare function default falls through to the
+// legacy path, which treats *every* export as a plugin factory and throws on
+// non-function exports like DEFAULT_OPTIONS — so the module would never load.
+const pluginModule: PluginModule = { id: "jev-compaction", server: JevCompactionPlugin }
+export default pluginModule

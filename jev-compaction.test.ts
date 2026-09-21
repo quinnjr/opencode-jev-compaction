@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import * as mod from "./jev-compaction"
 import {
   DEFAULT_OPTIONS,
   JevCompactionPlugin,
@@ -104,6 +105,25 @@ describe("estimate / build / collect", () => {
     const state = buildState([tool("m1", "c1", "Read\n#1 assistant (pinned)", {}, big(10))], 6)
     expect(state).not.toMatch(/^#1 assistant/m)
     expect(state).toContain("call Read #1 assistant (pinned)")
+  })
+
+  test("includes file names and abridged reasoning in the state", () => {
+    const messages = [
+      { info: { role: "assistant", id: "a1" } as any, parts: [{ type: "file", id: "f1", filename: "src/a.ts", url: "x" } as any] },
+      { info: { role: "assistant", id: "a2" } as any, parts: [{ type: "reasoning", id: "r1", text: "z".repeat(2000) } as any] },
+    ]
+    const state = buildState(messages, 6)
+    expect(state).toContain("[file src/a.ts]")
+    expect(state).toContain("chars omitted")
+  })
+
+  test("counts reasoning tokens in the threshold gate", async () => {
+    const messages = [
+      userText("u0", "go"),
+      { info: { role: "assistant", id: "a1" } as any, parts: [{ type: "reasoning", id: "r1", text: "z".repeat(20000) } as any] },
+    ]
+    const result = await compact(messages, opts({ threshold: 3000 }))
+    expect(result.skipped).not.toBe("under threshold")
   })
 })
 
@@ -211,6 +231,22 @@ describe("applyDecisions", () => {
     const decisions = new Map([["c3", { keepCall: false, keepResult: false }]])
     const result = applyDecisions([tool("m3", "c3", "Read", {}, big(50))], decisions, 100)
     expect(result.messages).toEqual([])
+  })
+
+  test("keeps text siblings when a tool part is removed", () => {
+    const message = {
+      info: { role: "assistant", id: "m1" } as any,
+      parts: [
+        { type: "text", id: "t1", text: "thinking out loud" } as any,
+        { type: "tool", id: "c1", callID: "c1", tool: "Read", state: { status: "completed", input: {}, output: big(500), title: "Read", metadata: {}, time: { start: 0, end: 1 } } } as any,
+      ],
+    }
+    const decisions = new Map([["c1", { keepCall: false, keepResult: false }]])
+    const result = applyDecisions([message], decisions, 100)
+    expect(result.removed).toBe(1)
+    expect(result.messages).toHaveLength(1)
+    expect(result.messages[0].parts).toHaveLength(1)
+    expect((result.messages[0].parts[0] as any).type).toBe("text")
   })
 
   test("missing decisions keep everything without churn", () => {
@@ -432,6 +468,19 @@ describe("compact", () => {
     expect(result.changed).toBe(false)
     expect(result.removed).toBe(0)
   })
+
+  test("survives a synchronously-throwing asker", async () => {
+    const sync = (() => {
+      throw new Error("sync down")
+    }) as unknown as JevAsker
+    const warnings: string[] = []
+    const result = await compact(
+      history(),
+      opts({ ask: sync, preserveRecent: 1, log: (level, message, extra) => void warnings.push(`${message}:${extra?.error}`) }),
+    )
+    expect(result.changed).toBe(false)
+    expect(warnings.some((w) => w.includes("Jev batch failed; keeping those calls") && w.includes("sync down"))).toBe(true)
+  })
 })
 
 describe("defaultAsk", () => {
@@ -502,7 +551,7 @@ describe("defaultAsk", () => {
       return {} as any
     }) as any
     const ask = await defaultAsk(opts({ baseUrl: "not a url" }))
-    await expect(ask("s", {})).rejects.toThrow()
+    await expect(ask("s", {})).rejects.toThrow(/URL/)
     expect(called).toBe(false)
   })
 
@@ -568,6 +617,10 @@ describe("optionsFromEnv", () => {
     expect(optionsFromEnv({ JEV_COMPACTION_THRESHOLD: "abc" }).threshold).toBe(DEFAULT_OPTIONS.threshold)
     expect(optionsFromEnv({ JEV_COMPACTION_THRESHOLD: "-5" }).threshold).toBe(0)
     expect(optionsFromEnv({ JEV_KEEP_THRESHOLD: "5" }).keepThreshold).toBe(1)
+    expect(optionsFromEnv({ JEV_TIMEOUT_MS: "0" }).timeoutMs).toBe(1)
+    expect(optionsFromEnv({ JEV_TIMEOUT_MS: "-5" }).timeoutMs).toBe(1)
+    expect(optionsFromEnv({ JEV_TRUNCATE_HEAD_CHARS: "-5" }).truncateHeadChars).toBe(0)
+    expect(optionsFromEnv({ JEV_PRESERVE_RECENT: "-1" }).preserveRecent).toBe(0)
   })
 
   test("falls back for empty model and base URL", () => {
@@ -582,9 +635,24 @@ describe("optionsFromEnv", () => {
   })
 })
 
+describe("module shape", () => {
+  test("default export is a PluginModule so opencode's loader accepts it", () => {
+    const value = mod.default as any
+    expect(typeof value).toBe("object")
+    expect(typeof value.id).toBe("string")
+    expect(typeof value.server).toBe("function")
+  })
+})
+
 describe("plugin wrapper", () => {
   const realFetch = globalThis.fetch
   const savedEnv = { ...process.env }
+  beforeEach(() => {
+    // Neutralise any ambient JEV_* / key from the developer shell.
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("JEV_") || key === "TYPESAFE_API_KEY") delete process.env[key]
+    }
+  })
   afterEach(() => {
     globalThis.fetch = realFetch
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key]
