@@ -124,14 +124,17 @@ function summarize(text: string, max: number): string {
   return `${text.slice(0, max)}…`
 }
 
+/** Unicode line/paragraph separators plus the C0/C1 breaks JSON.stringify leaves raw. */
+const LINE_BREAKS = /[\r\n\u000b\u000c\u001c-\u001e\u0085\u2028\u2029]+/g
+
 /** Collapse whitespace and clamp, so a hostile tool name cannot forge state lines. */
 function oneLine(text: string, max = TOOL_NAME_MAX_CHARS): string {
-  return text.replace(/\s+/g, " ").slice(0, max)
+  return text.replace(/[\s\u0085\u001c-\u001e]+/g, " ").slice(0, max)
 }
 
 /** Neutralize line terminators in text pushed into the line-oriented state, without clamping. */
 function stateLine(text: string): string {
-  return text.replace(/[\r\n\u2028\u2029]+/g, " ")
+  return text.replace(LINE_BREAKS, " ")
 }
 
 /** Whether opencode actually sends this message (it drops errored assistant turns). */
