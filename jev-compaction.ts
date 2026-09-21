@@ -129,9 +129,17 @@ function oneLine(text: string, max = TOOL_NAME_MAX_CHARS): string {
   return text.replace(/\s+/g, " ").slice(0, max)
 }
 
-/** Neutralize newlines in text pushed into the line-oriented state, without clamping. */
+/** Neutralize line terminators in text pushed into the line-oriented state, without clamping. */
 function stateLine(text: string): string {
-  return text.replace(/[\r\n]+/g, " ")
+  return text.replace(/[\r\n\u2028\u2029]+/g, " ")
+}
+
+/** Whether opencode actually sends this message (it drops errored assistant turns). */
+function isSent(message: Msg): boolean {
+  const info = message.info
+  if (info.role !== "assistant" || !info.error) return true
+  if (info.error.name !== "MessageAbortedError") return false
+  return message.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
 }
 
 function abridge(text: string, head: number, tail: number): string {
@@ -223,6 +231,7 @@ const isPinned = (index: number, total: number, preserveRecent: number) =>
 export function collectToolCalls(messages: Msg[], preserveRecent: number): ToolRef[] {
   const refs: ToolRef[] = []
   messages.forEach((message, index) => {
+    if (!isSent(message)) return
     const pinned = isPinned(index, messages.length, preserveRecent)
     for (const part of message.parts) {
       if (!isToolPart(part)) continue
@@ -236,6 +245,7 @@ export function collectToolCalls(messages: Msg[], preserveRecent: number): ToolR
 export function buildState(messages: Msg[], preserveRecent: number, sendText = true): string {
   const lines: string[] = []
   messages.forEach((message, index) => {
+    if (!isSent(message)) return
     const pinned = isPinned(index, messages.length, preserveRecent)
     lines.push(`#${index} ${message.info.role}${pinned ? " (pinned)" : ""}`)
     for (const part of message.parts) {
@@ -484,7 +494,9 @@ export async function compact(messages: Msg[], options: CompactionOptions): Prom
   if (!options.enabled) return { ...empty, skipped: "disabled" }
   if (messages.length === 0) return { ...empty, skipped: "empty" }
 
-  const totalTokens = messages.reduce((sum, m) => sum + m.parts.reduce((s, p) => s + estimatePartTokens(p, m.info.role), 0), 0)
+  const totalTokens = messages
+    .filter(isSent)
+    .reduce((sum, m) => sum + m.parts.reduce((s, p) => s + estimatePartTokens(p, m.info.role), 0), 0)
   if (totalTokens < options.threshold) return { ...empty, skipped: "under threshold" }
 
   const fitted = fitState(buildState(messages, options.preserveRecent, options.sendText ?? DEFAULT_OPTIONS.sendText), options.maxStateTokens)
