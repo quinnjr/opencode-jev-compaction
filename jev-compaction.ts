@@ -239,7 +239,9 @@ export function fitState(state: string, maxStateTokens: number): string | null {
   const lines = state.split("\n")
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].length <= STATE_LINE_MIN_ABRIDGE) continue
-    lines[i] = abridge(lines[i], STATE_LINE_HEAD, STATE_LINE_TAIL)
+    // abridge inserts newlines around its marker; re-neutralize them so the
+    // retained tail cannot become an unindented, forged state line.
+    lines[i] = stateLine(abridge(lines[i], STATE_LINE_HEAD, STATE_LINE_TAIL))
     if (estimateTokens(lines.join("\n")) <= maxStateTokens) return lines.join("\n")
   }
   return null
@@ -426,14 +428,24 @@ async function mapLimit<T, R>(
     for (;;) {
       const index = next++
       if (index >= items.length) return
-      if (Date.now() >= deadline) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
         results[index] = { status: "rejected", reason: new Error("jev-compaction total deadline exceeded") }
         continue
       }
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const expiry = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("jev-compaction total deadline exceeded")), remaining)
+      })
       try {
-        results[index] = { status: "fulfilled", value: await run(items[index]) }
+        // Race so an in-flight request cannot outlast the overall deadline.
+        // Promise.race attaches handlers to the losing promise, so a late
+        // rejection from it is not unhandled.
+        results[index] = { status: "fulfilled", value: await Promise.race([run(items[index]), expiry]) }
       } catch (reason) {
         results[index] = { status: "rejected", reason }
+      } finally {
+        if (timer) clearTimeout(timer)
       }
     }
   }
